@@ -199,10 +199,10 @@ module.exports = class FlipstarterCommitmentWatcher extends EventEmitter {
       })
 
       commitments.forEach(commitment => contract.addCommitment({
-        previousTransactionHash: Buffer.from(commitment.txHash, 'hex'),
-        previousTransactionOutputIndex: commitment.txIndex,
+        txHash: Buffer.from(commitment.txHash, 'hex'),
+        txIndex: commitment.txIndex,
         unlockingScript: Buffer.from(commitment.unlockingScript, 'hex'),
-        sequenceNumber: commitment.seqNum,
+        seqNum: commitment.seqNum,
         value: commitment.satoshis,
       }))
 
@@ -210,7 +210,13 @@ module.exports = class FlipstarterCommitmentWatcher extends EventEmitter {
       const rawTransaction = contract.assembleTransaction().toString("hex")
 
       // Broadcast transaction
-      return await this.electrum.request("blockchain.transaction.broadcast", rawTransaction)
+      const result = await this.electrum.request("blockchain.transaction.broadcast", rawTransaction)
+
+      if (result.name === "Error") {
+        throw result
+      } 
+
+      return result
     
     } finally {
 

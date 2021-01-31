@@ -155,7 +155,7 @@ module.exports = class FlipstarterAssuranceContract {
       outputIndex.writeUInt32LE(commitment.txIndex);
 
       commitmentBuffers.push(
-        AssuranceContract.serializeInput(
+        FlipstarterAssuranceContract.serializeInput(
           reverseBuf(commitment.txHash),
           outputIndex,
           commitment.unlockingScript,
