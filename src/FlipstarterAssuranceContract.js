@@ -23,7 +23,7 @@ module.exports = class FlipstarterAssuranceContract {
    * @param satoshis    integer number of satoshis to send to the address.
    * @param address     cashaddr encoded output address to send satoshis to.
    */
-  static addOutput(satoshis, address) {
+  addOutput(satoshis, address) {
     this.outputs.push(TransactionHelper.addOutput(satoshis, address))
   }
 
