@@ -1,4 +1,3 @@
-// Initialize mutex locking library.
 const { BITBOX } = require("bitbox-sdk")
 const moment = require("moment")
 

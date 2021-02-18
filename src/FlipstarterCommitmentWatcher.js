@@ -4,18 +4,12 @@ const validateCommitmentUtxo = require("./utils/validateCommitmentUtxo")
 const validateCommitment = require('./utils/validateCommitment')
 const FlipstarterErrors = require('./errors')
 
-const { Mutex } = require('async-mutex')
-
 module.exports = class FlipstarterCommitmentWatcher extends EventEmitter {
   
   constructor(electrum) {
     super()
 
     this.electrum = electrum
-    // initialize a revocation event check lock.
-    this.submissionLock = new Mutex();
-    this.handleRevocationsLock = new Mutex()
-    this.checkForTransactionUpdatesLock = new Mutex()
     this.subscribedScriphashes = {}
   }
 
@@ -28,63 +22,43 @@ module.exports = class FlipstarterCommitmentWatcher extends EventEmitter {
     // Get a list of unspent outputs for the input address.
     // Locate the UTXO in the list of unspent transaction outputs.
     const inputUTXOs = await this.electrum.request("blockchain.scripthash.listunspent", scriptHash);
-
-    // Get a mutex lock ready.
-    const unlock = await this.checkForTransactionUpdatesLock.acquire();
-
-    try {
       
-      await Promise.all(commitments.map(async (commitment) => {
+    await Promise.all(commitments.map(async (commitment) => {
 
-        if (!commitment.revoked) {
+      if (!commitment.revoked) {
+        
+        // Validate the that referenced transaction output is unspent...
+        const validCommitment = inputUTXOs && inputUTXOs.length && !!inputUTXOs.find((utxo) => {
+          return utxo.tx_hash === commitment.txHash && utxo.tx_pos === commitment.txIndex
+        })
+
+        if (!validCommitment) {
+
+          await this.unsubscribeToCommitment(commitment)
+
+        } else {
           
-          // Validate the that referenced transaction output is unspent...
-          const validCommitment = inputUTXOs && inputUTXOs.length && !!inputUTXOs.find((utxo) => {
-            return utxo.tx_hash === commitment.txHash && utxo.tx_pos === commitment.txIndex
-          })
-
-          if (!validCommitment) {
-
-            await this.unsubscribeToCommitment(commitment)
-
-          } else {
-            
-            await this.subscribeToCommitment(commitment)
-          }
+          await this.subscribeToCommitment(commitment)
         }
-      }))
-
-    } finally {
-      // Unlock the mutex so the next process can continue.
-      unlock();
-    }
+      }
+    }))
   }
 
   async handleRevocations(data) {    
     // Check if the notification is a status update.
     if (Array.isArray(data)) {
-      // Get the script hash.
-      const scriptHash = data[0];
-      const scriptHashStatus = data[1];
+    // Get the script hash.
+    const scriptHash = data[0];
+    const scriptHashStatus = data[1];
 
-      // Get a mutex lock ready.
-      const unlock = await this.handleRevocationsLock.acquire();
+      const subscription = this.subscribedScriphashes[scriptHash] || { status: false, commitments: [] }
+      this.subscribedScriphashes[scriptHash] = subscription
 
-      try {
-
-        const subscription = this.subscribedScriphashes[scriptHash] || { status: false, commitments: [] }
-        this.subscribedScriphashes[scriptHash] = subscription
-
-        // If this event is new or has a changed scripthash status..
-        if (subscription.status !== scriptHashStatus) {
-          // Update this scripthash status to prevent redundant work..
-          subscription.status = scriptHashStatus
-          await this.checkForTransactionUpdates(scriptHash, subscription.commitments)
-        }
-
-      } finally {
-        // Unlock the mutex so the next process can continue.
-        unlock();
+      // If this event is new or has a changed scripthash status..
+      if (subscription.status !== scriptHashStatus) {
+        // Update this scripthash status to prevent redundant work..
+        subscription.status = scriptHashStatus
+        await this.checkForTransactionUpdates(scriptHash, subscription.commitments)
       }
     }
   }
@@ -172,55 +146,35 @@ module.exports = class FlipstarterCommitmentWatcher extends EventEmitter {
 
   async validateCommitment(recipients, committedSatoshis, commitmentCount, commitmentData) {
 
-    // Get a mutex lock ready.
-    const unlockSubmissions = await this.submissionLock.acquire();
-
     // Validate and store contribution.
-    try {
-
-      return await validateCommitment(this.electrum, recipients, committedSatoshis, commitmentCount, commitmentData)
-     
-    } finally {
-
-      // Unlock the mutex so the next process can continue.
-      unlockSubmissions();
-    }
+    return await validateCommitment(this.electrum, recipients, committedSatoshis, commitmentCount, commitmentData)
   }
 
-  async fullfillCampaign(recipients, commitments) {
-    const unlock = await this.checkForTransactionUpdatesLock.acquire();
+  async fullfillCampaign(recipients, commitments) {    
+    const contract = new AssuranceContract()
     
-    try {
+    recipients.forEach(({ address, satoshis }) => {
+      contract.addOutput(satoshis, address)
+    })
 
-      const contract = new AssuranceContract()
-      
-      recipients.forEach(({ address, satoshis }) => {
-        contract.addOutput(satoshis, address)
-      })
+    commitments.forEach(commitment => contract.addCommitment({
+      txHash: Buffer.from(commitment.txHash, 'hex'),
+      txIndex: commitment.txIndex,
+      unlockingScript: Buffer.from(commitment.unlockingScript, 'hex'),
+      seqNum: commitment.seqNum,
+      value: commitment.satoshis,
+    }))
 
-      commitments.forEach(commitment => contract.addCommitment({
-        txHash: Buffer.from(commitment.txHash, 'hex'),
-        txIndex: commitment.txIndex,
-        unlockingScript: Buffer.from(commitment.unlockingScript, 'hex'),
-        seqNum: commitment.seqNum,
-        value: commitment.satoshis,
-      }))
+    // Assemble commitments into transaction
+    const rawTransaction = contract.assembleTransaction().toString("hex")
 
-      // Assemble commitments into transaction
-      const rawTransaction = contract.assembleTransaction().toString("hex")
+    // Broadcast transaction
+    const result = await this.electrum.request("blockchain.transaction.broadcast", rawTransaction)
 
-      // Broadcast transaction
-      const result = await this.electrum.request("blockchain.transaction.broadcast", rawTransaction)
+    if (result.name === "Error") {
+      throw result
+    } 
 
-      if (result.name === "Error") {
-        throw result
-      } 
-
-      return result
-    
-    } finally {
-
-      unlock()
-    }
+    return result
   }
 }
